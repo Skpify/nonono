@@ -1,88 +1,71 @@
-from http.server import BaseHTTPRequestHandler
+from flask import Flask, request, jsonify
 import secrets
-import json
 import urllib.request
 import urllib.parse
 import os
+import json
 
-class handler(BaseHTTPRequestHandler):
+app = Flask(__name__)
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+@app.route("/api/attestation", methods=["GET", "POST", "OPTIONS"])
+def attestation():
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        response = jsonify({})
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
 
-    def do_GET(self):
+    if request.method == "GET":
         nonce = secrets.token_urlsafe(32)
+        response = jsonify({"nonce": nonce})
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps({"nonce": nonce}).encode())
+    # POST - verify
+    data = request.get_json(silent=True) or {}
+    token = data.get("token")
+    nonce = data.get("nonce")
 
-    def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
+    if not token or not nonce:
+        return jsonify({"success": False, "error": "missing token or nonce"}), 400
 
-        try:
-            data = json.loads(body)
-        except Exception:
-            self._json_response(400, {"success": False, "error": "invalid json"})
-            return
+    access_token = os.environ.get("META_ACCESS_TOKEN")
+    if not access_token:
+        return jsonify({"success": False, "error": "server misconfigured"}), 500
 
-        token = data.get("token")
-        nonce = data.get("nonce")
+    params = urllib.parse.urlencode({
+        "token": token,
+        "access_token": access_token
+    })
+    url = f"https://graph.oculus.com/platform_integrity/verify?{params}"
 
-        if not token or not nonce:
-            self._json_response(400, {"success": False, "error": "missing token or nonce"})
-            return
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            result = json.loads(resp.read().decode())
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Meta request failed: {str(e)}"
+        }), 502
 
-        access_token = os.environ.get("META_ACCESS_TOKEN")
-        if not access_token:
-            self._json_response(500, {"success": False, "error": "server misconfigured"})
-            return
+    success = (
+        isinstance(result, dict)
+        and "data" in result
+        and len(result["data"]) > 0
+        and result["data"][0].get("message") == "success"
+    )
 
-        params = urllib.parse.urlencode({
-            "token": token,
-            "access_token": access_token
-        })
-        url = f"https://graph.oculus.com/platform_integrity/verify?{params}"
+    response = jsonify({
+        "success": success,
+        "claims": result["data"][0].get("claims") if success else None,
+        "error": None if success else "attestation verification failed",
+        "details": None if success else result
+    })
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response, 200 if success else 403
 
-        try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                result = json.loads(resp.read().decode())
-        except Exception as e:
-            self._json_response(502, {
-                "success": False,
-                "error": f"Meta request failed: {str(e)}"
-            })
-            return
 
-        success = (
-            isinstance(result, dict)
-            and "data" in result
-            and len(result["data"]) > 0
-            and result["data"][0].get("message") == "success"
-        )
-
-        if success:
-            self._json_response(200, {
-                "success": True,
-                "claims": result["data"][0].get("claims")
-            })
-        else:
-            self._json_response(403, {
-                "success": False,
-                "error": "attestation verification failed",
-                "details": result
-            })
-
-    def _json_response(self, status, payload):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps(payload).encode())
+# This is required by Vercel
+app = app
