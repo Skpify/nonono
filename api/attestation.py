@@ -15,7 +15,6 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        # Return a fresh cryptographically secure nonce
         nonce = secrets.token_urlsafe(32)
 
         self.send_response(200)
@@ -46,7 +45,6 @@ class handler(BaseHTTPRequestHandler):
             self._json_response(500, {"success": False, "error": "server misconfigured"})
             return
 
-        # Call Meta verification endpoint
         params = urllib.parse.urlencode({
             "token": token,
             "access_token": access_token
